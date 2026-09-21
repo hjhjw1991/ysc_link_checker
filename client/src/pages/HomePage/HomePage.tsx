@@ -2,8 +2,14 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Copy, Check, Zap, AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import { toast } from 'sonner';
 
-import { probe } from '@client/src/api';
-import type { ProbeResponse, ProbeResultItem, ProbeProgressResponse } from '@shared/api.interface';
+import { probe, sources as sourcesApi } from '@client/src/api';
+import type {
+  ConfigSource,
+  ProbeResponse,
+  ProbeResultItem,
+  ProbeProgressResponse,
+} from '@shared/api.interface';
+import { CustomSourcePanel } from './CustomSourcePanel';
 import { ProbeProgress } from './ProbeProgress';
 import { ResultItem } from './ResultItem';
 
@@ -13,7 +19,6 @@ function formatDuration(ms: number): string {
 }
 
 const POLL_INTERVAL_MS = 500;
-const BUILTIN_SOURCE_COUNT = 19;
 
 export default function HomePage() {
   const [loading, setLoading] = useState(false);
@@ -22,6 +27,8 @@ export default function HomePage() {
   const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [copiedAll, setCopiedAll] = useState(false);
   const [showUnavailable, setShowUnavailable] = useState(false);
+  const [builtinSources, setBuiltinSources] = useState<ConfigSource[]>([]);
+  const [customSources, setCustomSources] = useState<ConfigSource[]>([]);
   const pollTimerRef = useRef<number | null>(null);
 
   const stopPolling = useCallback(() => {
@@ -80,6 +87,18 @@ export default function HomePage() {
       stopPolling();
     };
   }, [stopPolling]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const { builtin, custom } = await sourcesApi.listSources();
+        setBuiltinSources(builtin);
+        setCustomSources(custom);
+      } catch {
+        // 列表拉不到不影响检测本身，静默降级即可
+      }
+    })();
+  }, []);
 
   const handleCopy = useCallback(async (url: string) => {
     try {
@@ -148,6 +167,12 @@ export default function HomePage() {
             </>
           )}
         </button>
+
+        <CustomSourcePanel
+          customSources={customSources}
+          onChange={setCustomSources}
+          disabled={loading}
+        />
 
         {loading && progress && (
           <ProbeProgress progress={progress} />
@@ -282,7 +307,9 @@ export default function HomePage() {
               点击上方按钮开始检测
             </p>
             <p className="mt-1 text-xs text-slate-400">
-              内置 {BUILTIN_SOURCE_COUNT} 个候选源，自动展开多仓子链接
+              内置 {builtinSources.length} 个候选源
+              {customSources.length > 0 && ` + 自定义 ${customSources.length} 个`}
+              ，自动展开多仓子链接并去重
             </p>
           </div>
         )}

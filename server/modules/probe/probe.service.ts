@@ -1,5 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
+
+import { SourceDeduper, dedupeCandidates } from '../sources/dedupe';
+import { normalizeSourceKey } from '../sources/source-key';
+import { SourcesService, type ProbeCandidate } from '../sources/sources.service';
 import type {
   ProbeResponse,
   ProbeResultItem,
@@ -11,34 +15,6 @@ import type {
 const TIMEOUT_MS = 8000;
 const DESKTOP_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
-
-interface CandidateSource {
-  name: string;
-  url: string;
-  special?: 'github-readme' | 'github-tree';
-}
-
-const BUILTIN_SOURCES: CandidateSource[] = [
-  { name: '无邪多仓', url: 'https://raw.githubusercontent.com/wxrjck/-YSC-/refs/heads/main/wx.json' },
-  { name: '无邪优选仓', url: 'https://raw.githubusercontent.com/wxrjck/-YSC-/refs/heads/main/yx.txt' },
-  { name: '无邪聚合仓', url: 'https://raw.githubusercontent.com/wxrjck/-YSC-/refs/heads/main/jh.txt' },
-  { name: '月光宝盒多仓', url: 'https://jihulab.com/ygbh1/box/raw/main/dcang/dc.json' },
-  { name: '自用多仓', url: 'https://raw.liucn.cc/box/dm.txt' },
-  { name: '影视仓YSC配置', url: 'https://jihulab.com/mengzhu2/ysc/raw/main/YSC.json' },
-  { name: 'HG影视配置', url: 'https://api.hgyx.vip/hgyx.json' },
-  { name: '聚玩盒子4K', url: 'http://xhztv.top/4k.json' },
-  { name: '动漫专线', url: 'https://www.yingm.cc/dm/dm.json' },
-  { name: '游魂直播源', url: 'https://www.iyouhun.com/tv/zb' },
-  { name: 'IPTV直播源', url: 'https://live.zbds.top/tv/iptv4.txt' },
-  { name: '饭太硬线路', url: 'http://www.饭太硬.net/tv' },
-  { name: '饭太硬备用', url: 'http://fty.888484.xyz/tv' },
-  { name: '王二小线路', url: 'http://tvbox.王二小放牛娃.top' },
-  { name: '王二小备用', url: 'https://9280.kstore.vip/newwex.json' },
-  { name: '短剧专线', url: 'http://box.ufuzi.com/tv/qq/短剧频道/api.json' },
-  { name: '儿童专线', url: 'https://jihulab.com/ymz1231/xymz/raw/main/ymshaoer' },
-  { name: 'GitHub接口大全', url: 'https://raw.githubusercontent.com/wuxierj/TVBox/main/README.md', special: 'github-readme' },
-  { name: 'GitHub配置库', url: 'https://api.github.com/repos/qist/tvbox/git/trees/master?recursive=1', special: 'github-tree' },
-];
 
 interface ProbeTask {
   id: string;
@@ -58,6 +34,8 @@ interface ProbeTask {
 export class ProbeService {
   private readonly logger = new Logger(ProbeService.name);
   private tasks = new Map<string, ProbeTask>();
+
+  constructor(private readonly sourcesService: SourcesService) {}
 
   startProbe(): string {
     const taskId = this.genTaskId();
@@ -109,9 +87,13 @@ export class ProbeService {
   private async runProbe(task: ProbeTask): Promise<void> {
     try {
       const firstLevelResults: ProbeResultItem[] = [];
-      task.total = BUILTIN_SOURCES.length;
+      // 一级候选（内置 + 自定义）在 SourcesService 里已经去过重；这里用同一个池子
+      // 继续兜住二级展开，保证整场探测里同一个链接只跑一次。
+      const candidates = this.sourcesService.getProbeCandidates();
+      const deduper = new SourceDeduper(candidates.map((c) => c.url));
+      task.total = candidates.length;
 
-      const firstPromises = BUILTIN_SOURCES.map(async (src: CandidateSource) => {
+      const firstPromises = candidates.map(async (src: ProbeCandidate) => {
         task.currentItemName = src.name;
         task.currentItemUrl = src.url;
         const result = await this.probeOne(src.name, src.url, false);
@@ -127,12 +109,14 @@ export class ProbeService {
 
       await Promise.all(firstPromises);
 
-      const expandSources: CandidateSource[] = [];
+      const expandSources: { name: string; url: string }[] = [];
+      // 结果里的 url 可能已经被改写成 gh-proxy 镜像，按归一化 key 回查才认得出原候选
+      const candidateByKey = new Map(candidates.map((c) => [normalizeSourceKey(c.url), c]));
 
       for (const r of firstLevelResults) {
         if (!r.available) continue;
 
-        const src = BUILTIN_SOURCES.find((s: CandidateSource) => s.url === r.url);
+        const src = candidateByKey.get(normalizeSourceKey(r.url));
         if (src?.special === 'github-readme') {
           const links = await this.extractLinksFromReadme(r.url);
           for (const link of links) {
@@ -156,11 +140,17 @@ export class ProbeService {
         }
       }
 
-      if (expandSources.length > 0) {
-        const prevTotal = task.total;
-        task.total = prevTotal + expandSources.length;
+      // 多仓之间常互相收录同一条线路，展开结果里重复很多；过一遍去重池再探测
+      const newExpandSources = dedupeCandidates(deduper, expandSources);
+      this.logger.log(
+        `一级候选 ${candidates.length} 条；二级展开 ${expandSources.length} 条，` +
+          `去重后新增 ${newExpandSources.length} 条`,
+      );
 
-        const secondPromises = expandSources.map(async (src: CandidateSource) => {
+      if (newExpandSources.length > 0) {
+        task.total += newExpandSources.length;
+
+        const secondPromises = newExpandSources.map(async (src) => {
           task.currentItemName = src.name;
           task.currentItemUrl = src.url;
           const result = await this.probeOne(src.name, src.url, true);

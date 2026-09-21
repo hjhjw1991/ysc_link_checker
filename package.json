@@ -27,6 +27,8 @@
     "type:check:client": "tsc --noEmit --project tsconfig.app.json",
     "type:check:server": "tsc --noEmit --project tsconfig.node.json",
     "lint": "node ./scripts/lint.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "precommit": "node scripts/hooks/run-precommit.js",
     "prepare": "chmod +x .githooks/pre-commit 2>/dev/null; git config core.hooksPath .githooks 2>/dev/null || true"
   },
@@ -136,6 +138,7 @@
     "uuid": "11.0.5",
     "vaul": "^1.1.2",
     "vite": "^8",
+    "vitest": "^5.0.1",
     "zod": "^4.3.6"
   },
   "overrides": {

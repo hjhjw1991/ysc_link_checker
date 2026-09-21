@@ -5,12 +5,14 @@ import { PlatformModule } from '@lark-apaas/fullstack-nestjs-core';
 import { GlobalExceptionFilter } from './common/filters/exception.filter';
 import { ViewModule } from './modules/view/view.module';
 import { ProbeModule } from './modules/probe/probe.module';
+import { SourcesModule } from './modules/sources/sources.module';
 
 @Module({
   imports: [
     PlatformModule.forRoot(),
     // ====== @route-section: business-modules START ======
     ProbeModule,
+    SourcesModule,
     // ====== @route-section: business-modules END ======
 
     // ⚠️ @route-order: last

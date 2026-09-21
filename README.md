@@ -42,12 +42,50 @@ npm run start:local      # 浏览器打开 http://localhost:3000
 
 端口可通过 `.env` 里的 `SERVER_PORT` / `CLIENT_DEV_PORT` 调整。
 
+### 测试
+
+```bash
+npm test          # vitest，覆盖去重归一化 / 导入解析 / 存储 / 配置源服务
+npm run type:check
+npm run eslint
+```
+
+### 自定义配置源
+
+页面「开始检测」下方有折叠面板「自定义源」，粘贴文本即可导入，每行一条：
+
+```
+https://example.com/tv.json
+我的多仓,https://example.com/dc.json
+儿童专线 https://example.com/kids.txt
+# 和 // 开头的行会被忽略
+```
+
+没写名称时自动用「域名/文件名」兜底。导入的源落盘在 `data/custom-sources.json`
+（路径可用 `CUSTOM_SOURCES_FILE` 覆盖），重启不丢，可逐条删除；内置源不可删。
+
+**去重**：导入时与内置源、已导入源比对，重复的跳过并告诉你撞上了哪一条；探测时一级候选与
+二级展开结果（多仓子线路 / README 链接 / GitHub tree 文件）共用同一个去重池，同一个链接
+全程只探测一次。实测一次检测的二级展开 82 条候选去重后只剩 59 条。
+
+判重按归一化后的 key 比对，口径刻意保守——「宁可错放，不要多删」：
+
+| 视为同一条 | 保持区分 |
+| --- | --- |
+| gh-proxy 镜像地址 与 源地址 | `http` 与 `https` |
+| scheme / 域名大小写 | 路径大小写 |
+| 末尾多余的 `/`、默认端口、`#hash` | 查询串 `?a=1` |
+| 中文域名 与 其 punycode 写法 | 解析失败的串（只跟字面完全相同的合并） |
+
 ### 后端接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/probe` | 发起一次检测，立即返回 `{ taskId }`，探测在后台跑 |
 | `GET` | `/api/probe/:taskId` | 轮询进度与结果（`status` / `completed` / `items[]`） |
+| `GET` | `/api/sources` | 列出内置源与自定义源 |
+| `POST` | `/api/sources` | 导入，body `{ text }`，返回 `{ added, duplicates, invalid, custom }` |
+| `DELETE` | `/api/sources/:id` | 删除一条自定义源（内置源返回 404） |
 
 接口受框架的 CSRF double-submit 保护：请求需同时带 cookie `suda-csrf-token` 和同值的请求头
 `x-suda-csrf-token`（页面里由前端自动处理）。用 curl 手测：
@@ -64,11 +102,12 @@ curl -s -b /tmp/cj -H "x-suda-csrf-token: $CSRF" "http://localhost:3000/api/prob
 ### 目录结构
 
 ```
-server/modules/probe/     探测服务（数据源清单、并发探测、多仓展开、内容分类）
+server/modules/probe/     探测服务（并发探测、多仓展开、内容分类）
+server/modules/sources/   配置源管理：内置清单、导入解析、去重、落盘存储
 server/modules/view/      SPA 入口页渲染
 server/common/middlewares/ 本地独立运行所需的两个中间件（见下）
 shared/api.interface.ts   前后端共享类型
-client/src/pages/HomePage/ 页面主体（操作区 / 进度 / 结果列表）
+client/src/pages/HomePage/ 页面主体（操作区 / 自定义源面板 / 进度 / 结果列表）
 client/src/api/probe.ts   接口封装
 cli/                      Python 命令行版
 ```
@@ -134,8 +173,10 @@ Windows 可直接双击 `cli/一键检测.bat`。
 ## 三、检测逻辑
 
 1. **收集候选**：17 个内置直连源 + 2 个 GitHub 汇总源——接口大全仓库（正则提取 README 里全部
-   链接）与配置库（GitHub API 递归枚举仓库内 `.json`/`.txt`/`.m3u`）。
-2. **展开多仓**：命中 `storeHouse` / `urls` 字段的聚合仓，取出其中的子线路继续探测。
+   链接）与配置库（GitHub API 递归枚举仓库内 `.json`/`.txt`/`.m3u`）；Web 版还会带上你导入的
+   自定义源。
+2. **展开多仓**：命中 `storeHouse` / `urls` 字段的聚合仓，取出其中的子线路继续探测。Web 版在这
+   一步会对整个候选池去重（CLI 版不去重）。
 3. **内容级校验**（不只看 HTTP 200）：
    - 返回 HTML 页面 → 判为不可用（防爬 / JS 挑战页）；
    - JSON 且含 `storeHouse`/`urls` → `多仓`；含 `sites`/`spiders`/`lives`/`parses` → `影视配置`；
@@ -145,7 +186,8 @@ Windows 可直接双击 `cli/一键检测.bat`。
 
 ## 自定义数据源
 
-- Web 版：`server/modules/probe/probe.service.ts` 的 `BUILTIN_SOURCES`
+- Web 版：页面上的「自定义源」面板导入即可；要改内置清单见
+  `server/modules/sources/builtin-sources.ts`
 - CLI 版：`cli/ysc_link_checker.py` 的 `SEED_LINKS` / `GITHUB_MD_SOURCES` / `GITHUB_REPO_SOURCES`
 
 ## 免责声明

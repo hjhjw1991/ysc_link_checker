@@ -20,6 +20,10 @@ function formatDuration(ms: number): string {
 
 const POLL_INTERVAL_MS = 500;
 
+/** 健康度高的排前面，同分按响应快的优先 */
+const byHealth = (a: ProbeResultItem, b: ProbeResultItem) =>
+  b.health - a.health || a.responseTimeMs - b.responseTimeMs;
+
 export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [progress, setProgress] = useState<ProbeProgressResponse | null>(null);
@@ -115,6 +119,7 @@ export default function HomePage() {
     if (!result) return;
     const availableUrls = result.items
       .filter((item: ProbeResultItem) => item.available)
+      .sort(byHealth)
       .map((item: ProbeResultItem) => `${item.name}：${item.url}`)
       .join('\n');
 
@@ -129,8 +134,11 @@ export default function HomePage() {
   }, [result]);
 
   const displayItems = result?.items || progress?.items || [];
-  const availableItems = displayItems.filter((item: ProbeResultItem) => item.available);
-  const unavailableItems = displayItems.filter((item: ProbeResultItem) => !item.available);
+  const availableItems = displayItems.filter((item: ProbeResultItem) => item.available).sort(byHealth);
+  const unavailableItems = displayItems.filter((item: ProbeResultItem) => !item.available).sort(byHealth);
+  const avgHealth = availableItems.length
+    ? Math.round(availableItems.reduce((sum, item) => sum + item.health, 0) / availableItems.length)
+    : 0;
   const showResultSection = (result != null) || (loading && displayItems.length > 0);
 
   return (
@@ -197,7 +205,7 @@ export default function HomePage() {
                 <div className="text-lg font-bold text-rose-500">
                   {result ? result.unavailable : (progress?.unavailable || 0)}
                 </div>
-                <div className="text-[11px] text-slate-500">不可用</div>
+                <div className="text-[11px] text-slate-500">未达标</div>
               </div>
             </div>
 
@@ -205,6 +213,7 @@ export default function HomePage() {
               <div className="mt-3 flex items-center justify-between">
                 <span className="text-xs text-slate-500">
                   耗时 {formatDuration(result.elapsedMs)}
+                  {availableItems.length > 0 && ` · 可用源平均健康度 ${avgHealth} 分`}
                 </span>
                 {result.available > 0 && (
                   <button
@@ -230,7 +239,9 @@ export default function HomePage() {
 
             <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-700">
               <AlertCircle className="mr-1 inline h-3.5 w-3.5 align-[-2px]" />
-              可用 = 链接可访问且内容为有效配置/列表。公益链接随时可能失效，以当次检测为准。
+              健康度 0~100：连不通/非配置内容 0 分，能访问但不是配置 40 分，配置合法但没有条目
+              60 分，真的有内容 80 分起（按条目数、响应速度、字段完整度加分）。可用 = 80 分以上。
+              公益链接随时可能失效，以当次检测为准。
             </div>
 
             {availableItems.length > 0 && (
@@ -238,6 +249,7 @@ export default function HomePage() {
                 <h2 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-slate-800">
                   <Check className="h-4 w-4 text-emerald-500" />
                   可用链接 ({availableItems.length})
+                  <span className="ml-auto text-[11px] font-normal text-slate-400">按健康度排序</span>
                 </h2>
                 <div className="space-y-2.5">
                   {availableItems.map((item: ProbeResultItem, idx: number) => (
@@ -275,7 +287,7 @@ export default function HomePage() {
                     <line x1="15" y1="9" x2="9" y2="15" />
                     <line x1="9" y1="9" x2="15" y2="15" />
                   </svg>
-                  不可用链接 ({unavailableItems.length})
+                  未达标链接 ({unavailableItems.length})
                   <span className="ml-auto text-xs text-slate-400">
                     {showUnavailable ? '收起' : '展开'}
                   </span>

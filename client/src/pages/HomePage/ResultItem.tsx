@@ -1,6 +1,7 @@
 import { Check, XCircle } from 'lucide-react';
 
 import type { ProbeResultItem } from '@shared/api.interface';
+import { healthStyle } from './health-style';
 
 const TYPE_COLORS: Record<string, string> = {
   '影视配置': 'bg-blue-50 text-blue-700 border-blue-100',
@@ -24,12 +25,12 @@ interface ResultItemProps {
 }
 
 export function ResultItem({ item, copiedUrl, onCopy, index }: ResultItemProps) {
+  const health = healthStyle(item.health, item.healthTier);
+
   return (
     <div
       className={`rounded-xl border p-3 shadow-sm transition-all duration-300 ${
-        item.available
-          ? 'border-emerald-100 bg-white'
-          : 'border-rose-50 bg-rose-50/30'
+        item.available ? 'border-emerald-100 bg-white' : 'border-slate-100 bg-slate-50/40'
       }`}
       style={{ animationDelay: `${index * 20}ms` }}
     >
@@ -49,6 +50,16 @@ export function ResultItem({ item, copiedUrl, onCopy, index }: ResultItemProps) 
                 子源
               </span>
             )}
+            <span
+              className={`ml-auto shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${health.badge}`}
+              title={item.healthReason}
+            >
+              {item.health} 分 · {health.label}
+            </span>
+          </div>
+
+          <div className="mt-1.5 ml-5 h-1 overflow-hidden rounded-full bg-slate-100">
+            <div className={`h-full rounded-full ${health.bar}`} style={{ width: health.barWidth }} />
           </div>
           <div className="mt-1 ml-5 font-mono text-[11px] text-slate-500 break-all line-clamp-2">
             {item.url}
@@ -61,13 +72,20 @@ export function ResultItem({ item, copiedUrl, onCopy, index }: ResultItemProps) 
                 {item.type}
               </span>
             )}
+            {item.contentCount > 0 && (
+              <span className="shrink-0 rounded-md border border-slate-100 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                {item.contentCount} 条内容
+              </span>
+            )}
             <span className="text-[10px] text-slate-400">
               {item.responseTimeMs}ms · {formatSize(item.responseSizeBytes)}
             </span>
           </div>
-          {!item.available && item.errorReason && (
-            <div className="mt-1.5 ml-5 text-[10px] text-rose-500">
-              {item.errorReason}
+          {!item.available && item.healthReason && (
+            <div
+              className={`mt-1.5 ml-5 text-[10px] ${item.healthTier === 'dead' ? 'text-slate-500' : 'text-amber-600'}`}
+            >
+              {item.healthReason}
             </div>
           )}
         </div>

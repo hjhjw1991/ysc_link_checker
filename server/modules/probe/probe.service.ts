@@ -2,12 +2,12 @@ import { Injectable, Logger } from '@nestjs/common';
 import axios from 'axios';
 
 import { SourceDeduper, dedupeCandidates } from '../sources/dedupe';
+import { HEALTH_AVAILABLE_THRESHOLD, scoreHealth, tolerantJsonParse } from './health';
 import { normalizeSourceKey } from '../sources/source-key';
 import { SourcesService, type ProbeCandidate } from '../sources/sources.service';
 import type {
   ProbeResponse,
   ProbeResultItem,
-  ProbeResultType,
   ProbeProgressResponse,
   ProbeTaskStatus,
 } from '@shared/api.interface';
@@ -96,7 +96,7 @@ export class ProbeService {
       const firstPromises = candidates.map(async (src: ProbeCandidate) => {
         task.currentItemName = src.name;
         task.currentItemUrl = src.url;
-        const result = await this.probeOne(src.name, src.url, false);
+        const result = await this.probeOne(src.name, src.url, false, Boolean(src.special));
         firstLevelResults.push(result);
         task.items.push(result);
         task.completed += 1;
@@ -114,9 +114,11 @@ export class ProbeService {
       const candidateByKey = new Map(candidates.map((c) => [normalizeSourceKey(c.url), c]));
 
       for (const r of firstLevelResults) {
-        if (!r.available) continue;
-
         const src = candidateByKey.get(normalizeSourceKey(r.url));
+        // 索引源不是配置，评不到 80 分是正常的；只要连得通就该展开
+        const reachable = r.healthTier !== 'dead';
+        if (src?.special ? !reachable : !r.available) continue;
+
         if (src?.special === 'github-readme') {
           const links = await this.extractLinksFromReadme(r.url);
           for (const link of links) {
@@ -184,6 +186,8 @@ export class ProbeService {
     name: string,
     url: string,
     fromMultiWarehouse: boolean,
+    /** 索引源（GitHub README / 仓库文件树）：本身不是配置，只用来发现别的链接 */
+    isIndexSource = false,
   ): Promise<ProbeResultItem> {
     const startTime = Date.now();
     const encodedUrl = this.encodeUrl(url);
@@ -198,115 +202,80 @@ export class ProbeService {
         if (response) finalUrl = ghProxyUrl;
       }
 
-      if (!response) {
-        return {
-          name,
-          url: finalUrl,
-          available: false,
-          responseTimeMs: Date.now() - startTime,
-          errorReason: '请求失败或超时',
-          fromMultiWarehouse,
-        };
-      }
-
-      const { status, data, headers } = response;
       const responseTimeMs = Date.now() - startTime;
-      const responseSizeBytes = typeof data === 'string' ? Buffer.byteLength(data, 'utf-8') : 0;
 
-      if (status !== 200) {
+      if (!response) {
+        return this.deadResult(name, finalUrl, responseTimeMs, '请求失败或超时', fromMultiWarehouse);
+      }
+      if (response.status !== 200) {
         return {
-          name,
-          url: finalUrl,
-          available: false,
-          statusCode: status,
-          responseTimeMs,
-          responseSizeBytes,
-          errorReason: `HTTP ${status}`,
-          fromMultiWarehouse,
+          ...this.deadResult(name, finalUrl, responseTimeMs, `HTTP ${response.status}`, fromMultiWarehouse),
+          statusCode: response.status,
+          responseSizeBytes: response.body.length,
         };
       }
 
-      if (!data || (typeof data === 'string' && data.trim().length === 0)) {
-        return {
-          name,
-          url: finalUrl,
-          available: false,
-          statusCode: status,
-          responseTimeMs,
-          responseSizeBytes,
-          errorReason: '响应体为空',
-          fromMultiWarehouse,
-        };
-      }
+      const health = scoreHealth({
+        body: response.body,
+        contentType: response.headers['content-type'] || '',
+        responseTimeMs,
+      });
 
-      const contentType = (headers['content-type'] || '').toLowerCase();
-      const text = typeof data === 'string' ? data : String(data);
-
-      if (this.looksLikeHtml(text, contentType)) {
-        return {
-          name,
-          url: finalUrl,
-          available: false,
-          statusCode: status,
-          responseTimeMs,
-          responseSizeBytes,
-          errorReason: '返回HTML页面(可能是防爬或JS挑战)',
-          fromMultiWarehouse,
-        };
-      }
-
-      const jsonResult = this.tolerantJsonParse(text);
-      if (jsonResult !== null) {
-        const type = this.classifyJsonType(jsonResult);
-        return {
-          name,
-          url: finalUrl,
-          available: true,
-          type,
-          statusCode: status,
-          responseTimeMs,
-          responseSizeBytes,
-          fromMultiWarehouse,
-        };
-      }
-
-      if (responseSizeBytes >= 200) {
-        return {
-          name,
-          url: finalUrl,
-          available: true,
-          type: '直播列表',
-          statusCode: status,
-          responseTimeMs,
-          responseSizeBytes,
-          fromMultiWarehouse,
-        };
-      }
+      const reason = isIndexSource ? '索引源：用于发现其他链接，本身不是配置' : health.reason;
+      const available = !isIndexSource && health.health >= HEALTH_AVAILABLE_THRESHOLD;
 
       return {
         name,
         url: finalUrl,
-        available: false,
-        statusCode: status,
+        available,
+        health: health.health,
+        healthTier: health.tier,
+        contentCount: health.contentCount,
+        healthReason: reason,
+        type: health.type,
+        statusCode: response.status,
         responseTimeMs,
-        responseSizeBytes,
-        errorReason: '内容过短且无法解析',
+        responseSizeBytes: response.body.length,
+        // 保留 errorReason 给旧的展示逻辑：够不上「可用」时说明原因
+        errorReason: available ? undefined : reason,
         fromMultiWarehouse,
       };
     } catch (error) {
-      return {
+      return this.deadResult(
         name,
         url,
-        available: false,
-        responseTimeMs: Date.now() - startTime,
-        errorReason: error instanceof Error ? error.message : '未知错误',
+        Date.now() - startTime,
+        error instanceof Error ? error.message : '未知错误',
         fromMultiWarehouse,
-      };
+      );
     }
+  }
+
+  private deadResult(
+    name: string,
+    url: string,
+    responseTimeMs: number,
+    reason: string,
+    fromMultiWarehouse: boolean,
+  ): ProbeResultItem {
+    return {
+      name,
+      url,
+      available: false,
+      health: 0,
+      healthTier: 'dead',
+      contentCount: 0,
+      healthReason: reason,
+      responseTimeMs,
+      errorReason: reason,
+      fromMultiWarehouse,
+    };
   }
 
   private async safeGet(url: string): Promise<{
     status: number;
+    /** 原始字节：识别二进制内容必须看字节，不能只看解码后的字符串 */
+    body: Buffer;
     data: string;
     headers: Record<string, string>;
   } | null> {
@@ -318,13 +287,14 @@ export class ProbeService {
           Accept: '*/*',
           'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         },
-        responseType: 'text',
-        transformResponse: [(data: unknown) => data],
+        responseType: 'arraybuffer',
         validateStatus: () => true,
       });
+      const body = Buffer.from(response.data as ArrayBuffer);
       return {
         status: response.status,
-        data: response.data,
+        body,
+        data: body.toString('utf-8'),
         headers: response.headers as Record<string, string>,
       };
     } catch {
@@ -452,80 +422,14 @@ export class ProbeService {
     return Math.floor(k + ((base - tMin + 1) * delta) / (delta + skew));
   }
 
-  private looksLikeHtml(text: string, contentType: string): boolean {
-    if (contentType.includes('text/html')) return true;
-    const trimmed = text.trim();
-    if (/^<!doctype\s+html/i.test(trimmed)) return true;
-    if (/^<html[\s>]/i.test(trimmed)) return true;
-    if (/^<head[\s>]/i.test(trimmed)) return true;
-    const lower = trimmed.toLowerCase();
-    if (lower.includes('<body') && lower.includes('</body>')) return true;
-    if (lower.includes('javascript') && lower.includes('<script')) return true;
-    return false;
-  }
 
-  private tolerantJsonParse(text: string): unknown | null {
-    let cleaned = text.trim();
 
-    if (!cleaned.startsWith('{') && !cleaned.startsWith('[')) {
-      return null;
-    }
-
-    cleaned = cleaned
-      .replace(/^\/\/[^\n]*/gm, '')
-      .replace(/^\s*#[^\n]*/gm, '');
-
-    cleaned = cleaned.replace(/,(\s*[}\]])/g, '$1');
-
-    cleaned = cleaned.replace(
-      /("(?:\\.|[^"\\])*")/g,
-      (match: string) =>
-        match.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t'),
-    );
-
-    try {
-      return JSON.parse(cleaned);
-    } catch {
-      return null;
-    }
-  }
-
-  private classifyJsonType(obj: unknown): ProbeResultType {
-    if (!obj || typeof obj !== 'object') return 'JSON配置';
-
-    const o = obj as Record<string, unknown>;
-
-    if (
-      'storeHouse' in o ||
-      'urls' in o
-    ) {
-      const urlsValue = o.urls;
-      const storeHouseValue = o.storeHouse;
-      if (
-        (Array.isArray(urlsValue) && urlsValue.length > 0) ||
-        (Array.isArray(storeHouseValue) && storeHouseValue.length > 0)
-      ) {
-        return '多仓';
-      }
-    }
-
-    if (
-      'sites' in o ||
-      'spiders' in o ||
-      'lives' in o ||
-      'parses' in o
-    ) {
-      return '影视配置';
-    }
-
-    return 'JSON配置';
-  }
 
   private async extractMultiWarehouseChildren(url: string): Promise<{ name: string; url: string }[]> {
     const response = await this.safeGet(this.encodeUrl(url));
     if (!response || response.status !== 200) return [];
 
-    const parsed = this.tolerantJsonParse(response.data);
+    const parsed = tolerantJsonParse(response.data);
     if (!parsed || typeof parsed !== 'object') return [];
 
     const result: { name: string; url: string }[] = [];
@@ -577,7 +481,7 @@ export class ProbeService {
     const response = await this.safeGet(this.encodeUrl(url));
     if (!response || response.status !== 200) return [];
 
-    const parsed = this.tolerantJsonParse(response.data);
+    const parsed = tolerantJsonParse(response.data);
     if (!parsed || typeof parsed !== 'object') return [];
 
     const tree = (parsed as Record<string, unknown>).tree;

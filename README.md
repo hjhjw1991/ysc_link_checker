@@ -87,7 +87,7 @@ https://example.com/tv.json
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/probe` | 发起一次检测，立即返回 `{ taskId }`，探测在后台跑 |
-| `GET` | `/api/probe/:taskId` | 轮询进度与结果（`status` / `completed` / `items[]`） |
+| `GET` | `/api/probe/:taskId` | 轮询进度与结果（`items[]` 每项带 `health` / `healthTier` / `contentCount` / `healthReason`） |
 | `GET` | `/api/sources` | 列出内置源与自定义源 |
 | `POST` | `/api/sources` | 导入，body `{ text }`，返回 `{ added, duplicates, invalid, custom }` |
 | `DELETE` | `/api/sources/:id` | 删除一条自定义源（内置源返回 404） |
@@ -107,7 +107,8 @@ curl -s -b /tmp/cj -H "x-suda-csrf-token: $CSRF" "http://localhost:3000/api/prob
 ### 目录结构
 
 ```
-server/modules/probe/     探测服务（并发探测、多仓展开、内容分类）
+server/modules/probe/     探测服务（并发探测、多仓展开）
+server/modules/probe/health.ts  健康度打分：内容识别、条目计数、分档与加分
 server/modules/sources/   配置源管理：内置清单、导入解析、去重、落盘存储
 server/modules/view/      SPA 入口页渲染
 server/common/middlewares/ 本地独立运行所需的两个中间件（见下）
@@ -182,12 +183,26 @@ Windows 可直接双击 `cli/一键检测.bat`。
    自定义源。
 2. **展开多仓**：命中 `storeHouse` / `urls` 字段的聚合仓，取出其中的子线路继续探测。Web 版在这
    一步会对整个候选池去重（CLI 版不去重）。
-3. **内容级校验**（不只看 HTTP 200）：
-   - 返回 HTML 页面 → 判为不可用（防爬 / JS 挑战页）；
-   - JSON 且含 `storeHouse`/`urls` → `多仓`；含 `sites`/`spiders`/`lives`/`parses` → `影视配置`；
-     其他合法 JSON → `JSON配置`；
-   - 非 JSON 且体积足够 → `直播列表`；
-   - 体积过小 / JSON 解析失败 → 不可用，并给出原因。
+3. **健康度打分**（Web 版，0~100）：不只看 HTTP 200，也不只看结构合法，还要看**里面到底有没有内容**。
+
+| 分数 | 档位 | 判据 | 颜色 |
+| --- | --- | --- | --- |
+| **0** | 不可用 | 连不通 / HTTP≠200 / 空响应 / HTML 挑战页 / 二进制文件 | 灰 |
+| **40** | 非配置 | 能访问，但认不出是配置（`{}`、`{"error":...}`、看不出条目的纯文本） | 红 |
+| **60** | 空配置 | 结构合法却一条内容都没有（`{"sites": []}`） | 橙 |
+| **80~89** | 可用 | 有真实内容 | 黄绿 |
+| **90~100** | 可用 | 内容多、响应快、字段完整 | 绿 |
+
+80 分以上才算「可用」。80 分之上的 20 分来自：内容条数 0~12 分（对数递减：1 条 2 分、
+10 条 6 分、50 条 10 分、100+ 12 分）、响应速度 0~5 分、配置完整度 0~3 分（有 `spider`、
+`parses`、`lives` 各 +1）。
+
+条目数的算法：影视配置数 `sites + spiders + lives`，多仓数 `storeHouse/urls`，文本列表数
+`#EXTINF` 行或「名称,http://...」行。
+
+GitHub README / 仓库文件树这类**索引源**本身不是配置，不参与可用判定，但只要连得通就会展开。
+
+> CLI 版仍是二元判定（可用 / 不可用），没有健康度。
 
 ## 自定义数据源
 
@@ -198,5 +213,6 @@ Windows 可直接双击 `cli/一键检测.bat`。
 ## 免责声明
 
 - 本工具仅用于学习与交流，请勿用于商业用途；
-- 「可用」指链接可访问且内容为有效配置 / 列表；公益接口随时可能失效，以当次检测为准；
+- 「可用」指健康度 ≥ 80，即链接可访问、内容是有效配置 / 列表**且里面确实有条目**；
+  健康度只反映配置本身，不保证里面每个片源都能播；公益接口随时可能失效，以当次检测为准；
 - 接口版权归原作者所有。
